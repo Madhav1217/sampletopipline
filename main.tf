@@ -1,60 +1,14 @@
-# This stack assumes that a Default VPC is present
-
-data "aws_ami" "ubuntu" {
-  most_recent = true
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-
-  owners = ["099720109477"] # Canonical
+provider "aws" {
+  region = "${var.region}"
 }
 
-resource "aws_instance" "webserver" {
-  ami             = "data.aws_ami.ubuntu.id"
-  instance_type   = "${var.instance_type}"
-  key_name        = "${var.key_name}"
-  vpc_security_group_ids = [ "${aws_security_group.instance.id}" ]
-  user_data       = "${file("userdata.sh")}"
-  lifecycle {
-    create_before_destroy = true
-  }
-
-  provisioner "file" {
-    source      = "upload/index.html"
-    destination = "/tmp/index.html"
-    connection {
-      host = "${aws_instance.webserver.public_ip}"
-      type     = "ssh"
-      user     = "ubuntu"
-      private_key = "${file("madhav-poc.pem")}"
-      timeout = "2m"
-    }
-  }
-
-}
-
-resource "aws_security_group" "instance" {
-  name = "test-sg"
-  description = "Allow traffic for instances"
+resource "aws_security_group" "default" {
+  name = "ec2-elb-sg"
 
   ingress {
-    from_port = 22
-    to_port = 22
+    from_port = 0
+    to_port = 65535
     protocol = "tcp"
-    cidr_blocks = [ "0.0.0.0/0" ]
-  }
-
-  ingress {
-    protocol    = "tcp"
-    from_port   = 80
-    to_port     = 80
     cidr_blocks = ["0.0.0.0/0"]
   }
 
@@ -62,6 +16,65 @@ resource "aws_security_group" "instance" {
     from_port = 0
     to_port = 65535
     protocol = "tcp"
-    cidr_blocks = [ "0.0.0.0/0" ]
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port = -1
+    to_port = -1
+    protocol = "icmp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_key_pair" "default" {
+  key_name = "ec2-elb-key"
+  public_key = "${file("${var.key_path}")}""
+}
+
+resource "aws_instance" "server1" {
+  ami = "${var.ami}"
+  instance_type = "${var.instance_type}"
+  key_name = "${aws_key_pair.default.id}"
+  security_groups = ["${aws_security_group.default.name}"]
+  user_data = "${file("bootstrap-server1.sh")}"
+  tags = {
+    Name =  "server1"
+  }
+}
+
+resource "aws_instance" "server2" {
+  ami = "${var.ami}"
+  instance_type = "${var.instance_type}"
+  key_name = "${aws_key_pair.default.id}"
+  security_groups = ["${aws_security_group.default.name}"]
+  user_data = "${file("bootstrap-server2.sh")}"
+  tags = {
+    Name =  "server2"
+  }
+}
+
+resource "aws_elb" "default" {
+  name = "ec2-elb"
+  instances = ["${aws_instance.server1.id}", "${aws_instance.server2.id}"]
+  availability_zones = ["us-east-2a", "us-east-2b", "us-east-2c"]
+
+  listener {
+    instance_port = 80
+    instance_protocol = "tcp"
+    lb_port = 80
+    lb_protocol = "tcp"
+  }
+
+  health_check {
+    target = "HTTP:80/"
+    healthy_threshold = 2
+    unhealthy_threshold = 2
+    interval = 30
+    timeout = 5
+  }
+
+  tags ={
+    Name = "ec2-elb"
   }
 }
